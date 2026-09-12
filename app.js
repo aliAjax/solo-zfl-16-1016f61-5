@@ -14,6 +14,7 @@ const defaultState = {
   selectedTypeId: starterInventory[0].id,
   placements: [],
   drafts: [],
+  works: [],
   settings: {
     paperSize: "postcard",
     flowMode: "horizontal",
@@ -22,7 +23,13 @@ const defaultState = {
   }
 };
 
+const HISTORY_LIMIT = 50;
+const WORK_LIMIT = 12;
+
 let state = loadState();
+const history = { past: [], future: [] };
+let renamingWorkId = null;
+let renameDraftValue = "";
 
 const els = {
   paperSize: document.querySelector("#paperSize"),
@@ -43,11 +50,19 @@ const els = {
   shortageBadge: document.querySelector("#shortageBadge"),
   usageList: document.querySelector("#usageList"),
   draftList: document.querySelector("#draftList"),
+  workList: document.querySelector("#workList"),
   placedCount: document.querySelector("#placedCount"),
   inventoryCount: document.querySelector("#inventoryCount"),
   saveDraftBtn: document.querySelector("#saveDraftBtn"),
+  saveWorkBtn: document.querySelector("#saveWorkBtn"),
   exportBtn: document.querySelector("#exportBtn"),
-  clearBoardBtn: document.querySelector("#clearBoardBtn")
+  clearBoardBtn: document.querySelector("#clearBoardBtn"),
+  undoBtn: document.querySelector("#undoBtn"),
+  redoBtn: document.querySelector("#redoBtn"),
+  modalBackdrop: document.querySelector("#modalBackdrop"),
+  modalTitle: document.querySelector("#modalTitle"),
+  modalBody: document.querySelector("#modalBody"),
+  modalCloseBtn: document.querySelector("#modalCloseBtn")
 };
 
 function loadState() {
@@ -69,11 +84,16 @@ function saveState() {
   localStorage.setItem(storageKey, JSON.stringify(state));
 }
 
-function getGrid() {
-  const size = state.settings.paperSize;
+function getGrid(size = state.settings.paperSize) {
   if (size === "bookmark") return { cols: 7, rows: 18 };
   if (size === "square") return { cols: 12, rows: 12 };
   return { cols: 16, rows: 10 };
+}
+
+function paperLabel(size) {
+  if (size === "bookmark") return "书签";
+  if (size === "square") return "方形小笺";
+  return "明信片";
 }
 
 function placementKey(row, col) {
@@ -89,6 +109,49 @@ function getUsage() {
     acc[placement.typeId] = (acc[placement.typeId] || 0) + 1;
     return acc;
   }, {});
+}
+
+function getShortages() {
+  const usage = getUsage();
+  return state.inventory
+    .filter((item) => (usage[item.id] || 0) > item.quantity)
+    .map((item) => ({ item, used: usage[item.id], over: usage[item.id] - item.quantity }));
+}
+
+function snapshotBoard() {
+  return {
+    settings: structuredClone(state.settings),
+    placements: structuredClone(state.placements)
+  };
+}
+
+function pushHistory() {
+  history.past.push(snapshotBoard());
+  if (history.past.length > HISTORY_LIMIT) history.past.shift();
+  history.future = [];
+}
+
+function applySnapshot(snapshot) {
+  state.settings = structuredClone(snapshot.settings);
+  state.placements = structuredClone(snapshot.placements);
+  renderAll();
+}
+
+function undo() {
+  if (!history.past.length) return;
+  history.future.push(snapshotBoard());
+  applySnapshot(history.past.pop());
+}
+
+function redo() {
+  if (!history.future.length) return;
+  history.past.push(snapshotBoard());
+  applySnapshot(history.future.pop());
+}
+
+function updateUndoRedo() {
+  els.undoBtn.disabled = !history.past.length;
+  els.redoBtn.disabled = !history.future.length;
 }
 
 function renderSettings() {
@@ -204,6 +267,45 @@ function renderDrafts() {
       .join("") || `<p class="empty">还没有保存草稿。</p>`;
 }
 
+function renderWorks() {
+  els.workList.innerHTML =
+    state.works
+      .map((work) => {
+        if (work.id === renamingWorkId) {
+          return `
+            <article class="draft-item">
+              <input class="rename-input" type="text" maxlength="24" value="${escapeHtml(renameDraftValue)}" data-rename-input="${work.id}" />
+              <div class="draft-actions">
+                <button type="button" data-confirm-rename="${work.id}">确定</button>
+                <button type="button" data-cancel-rename>取消</button>
+              </div>
+            </article>
+          `;
+        }
+        return `
+          <article class="draft-item">
+            <strong>${escapeHtml(work.name)}</strong>
+            <span>${work.placements.length}个落字 · ${paperLabel(work.settings.paperSize)} · ${new Date(work.savedAt).toLocaleString("zh-CN")}</span>
+            <div class="draft-actions work-actions">
+              <button type="button" data-preview-work="${work.id}">预览</button>
+              <button type="button" data-restore-work="${work.id}">恢复</button>
+              <button type="button" data-rename-work="${work.id}">重命名</button>
+              <button type="button" data-remove-work="${work.id}">移除</button>
+            </div>
+          </article>
+        `;
+      })
+      .join("") || `<p class="empty">还没有命名作品。</p>`;
+
+  if (renamingWorkId) {
+    const input = els.workList.querySelector("[data-rename-input]");
+    if (input && document.activeElement !== input) {
+      input.focus();
+      input.select();
+    }
+  }
+}
+
 function renderAll() {
   saveState();
   renderSettings();
@@ -212,10 +314,13 @@ function renderAll() {
   renderStage();
   renderUsage();
   renderDrafts();
+  renderWorks();
+  updateUndoRedo();
 }
 
 function placeType(row, col, typeId = state.selectedTypeId) {
   if (!typeId) return;
+  pushHistory();
   const existingIndex = state.placements.findIndex((item) => item.row === row && item.col === col);
   if (existingIndex >= 0) {
     if (state.placements[existingIndex].typeId === typeId) {
@@ -261,10 +366,89 @@ function saveDraft() {
   renderAll();
 }
 
-function exportPreview() {
-  const { cols, rows } = getGrid();
-  const cell = state.settings.paperSize === "bookmark" ? 44 : 56;
-  const gap = state.settings.gridGap;
+function uniqueWorkName(base, excludeId = null) {
+  const names = new Set(state.works.filter((work) => work.id !== excludeId).map((work) => work.name));
+  if (!names.has(base)) return base;
+  let index = 2;
+  while (names.has(`${base}（${index}）`)) index += 1;
+  return `${base}（${index}）`;
+}
+
+function saveWork() {
+  const shortages = getShortages();
+  if (shortages.length) {
+    showShortageModal("保存作品", shortages);
+    return;
+  }
+  state.works.unshift({
+    id: crypto.randomUUID(),
+    name: uniqueWorkName(state.settings.workTitle.trim() || "未命名作品"),
+    settings: structuredClone(state.settings),
+    placements: structuredClone(state.placements),
+    savedAt: new Date().toISOString()
+  });
+  state.works = state.works.slice(0, WORK_LIMIT);
+  renderAll();
+}
+
+function restoreWork(workId) {
+  const work = state.works.find((item) => item.id === workId);
+  if (!work) return;
+  pushHistory();
+  applySnapshot(work);
+}
+
+function previewWork(workId) {
+  const work = state.works.find((item) => item.id === workId);
+  if (!work) return;
+  const body = document.createElement("div");
+  body.className = "work-preview";
+  const meta = document.createElement("p");
+  meta.className = "modal-tip";
+  const flow = work.settings.flowMode === "vertical" ? "竖排" : "横排";
+  meta.textContent = `${work.placements.length}个落字 · ${paperLabel(work.settings.paperSize)} · ${flow} · 保存于 ${new Date(work.savedAt).toLocaleString("zh-CN")}`;
+  const canvas = drawWorkCanvas(work);
+  canvas.className = "preview-canvas";
+  body.append(meta, canvas);
+  openModal(`预览：${work.name}`, body);
+}
+
+function openModal(title, bodyNode) {
+  els.modalTitle.textContent = title;
+  els.modalBody.replaceChildren(bodyNode);
+  els.modalBackdrop.hidden = false;
+}
+
+function closeModal() {
+  els.modalBackdrop.hidden = true;
+  els.modalBody.replaceChildren();
+}
+
+function showShortageModal(actionName, shortages) {
+  const body = document.createElement("div");
+  body.innerHTML = `
+    <p class="modal-tip">以下字模用量超出库存，本次${escapeHtml(actionName)}已被拦截。请撤下多余落字或补充字模数量后再试。</p>
+    <div class="usage-list">
+      ${shortages
+        .map(
+          ({ item, used, over }) => `
+            <div class="usage-item warn">
+              <strong>${escapeHtml(item.char)} · ${escapeHtml(item.style)}</strong>
+              <span>已用 ${used} / 库存 ${item.quantity}，超出 ${over}</span>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+  openModal(`字模超量，无法${actionName}`, body);
+}
+
+function drawWorkCanvas(work) {
+  const settings = work.settings;
+  const { cols, rows } = getGrid(settings.paperSize);
+  const cell = settings.paperSize === "bookmark" ? 44 : 56;
+  const gap = settings.gridGap;
   const margin = 48;
   const width = cols * cell + (cols - 1) * gap + margin * 2;
   const height = rows * cell + (rows - 1) * gap + margin * 2 + 70;
@@ -279,9 +463,8 @@ function exportPreview() {
   ctx.strokeRect(18, 18, width - 36, height - 36);
   ctx.fillStyle = "#22201c";
   ctx.font = "bold 28px sans-serif";
-  ctx.fillText(state.settings.workTitle || "未命名作品", margin, 50);
-  ctx.font = "bold 30px serif";
-  state.placements.forEach((placement) => {
+  ctx.fillText(settings.workTitle || "未命名作品", margin, 50);
+  work.placements.forEach((placement) => {
     const type = state.inventory.find((item) => item.id === placement.typeId);
     if (!type) return;
     const x = margin + placement.col * (cell + gap);
@@ -294,6 +477,16 @@ function exportPreview() {
     ctx.font = `900 ${Math.min(type.size + 8, 42)}px serif`;
     ctx.fillText(type.char, x + cell / 2, y + cell / 2);
   });
+  return canvas;
+}
+
+function exportPreview() {
+  const shortages = getShortages();
+  if (shortages.length) {
+    showShortageModal("导出预览图", shortages);
+    return;
+  }
+  const canvas = drawWorkCanvas({ settings: state.settings, placements: state.placements });
   const link = document.createElement("a");
   link.download = `${state.settings.workTitle || "movable-type"}.png`;
   link.href = canvas.toDataURL("image/png");
@@ -335,8 +528,13 @@ els.typeForm.addEventListener("submit", addType);
 els.inventorySearch.addEventListener("input", renderInventory);
 els.styleFilter.addEventListener("change", renderInventory);
 els.saveDraftBtn.addEventListener("click", saveDraft);
+els.saveWorkBtn.addEventListener("click", saveWork);
 els.exportBtn.addEventListener("click", exportPreview);
+els.undoBtn.addEventListener("click", undo);
+els.redoBtn.addEventListener("click", redo);
 els.clearBoardBtn.addEventListener("click", () => {
+  if (!state.placements.length) return;
+  pushHistory();
   state.placements = [];
   renderAll();
 });
@@ -386,13 +584,106 @@ els.draftList.addEventListener("click", (event) => {
   if (loadButton) {
     const draft = state.drafts.find((item) => item.id === loadButton.dataset.loadDraft);
     if (!draft) return;
-    state.settings = structuredClone(draft.settings);
-    state.placements = structuredClone(draft.placements);
-    renderAll();
+    pushHistory();
+    applySnapshot(draft);
   }
   if (deleteButton) {
     state.drafts = state.drafts.filter((item) => item.id !== deleteButton.dataset.deleteDraft);
     renderAll();
+  }
+});
+
+els.workList.addEventListener("click", (event) => {
+  const previewButton = event.target.closest("[data-preview-work]");
+  const restoreButton = event.target.closest("[data-restore-work]");
+  const renameButton = event.target.closest("[data-rename-work]");
+  const removeButton = event.target.closest("[data-remove-work]");
+  const confirmButton = event.target.closest("[data-confirm-rename]");
+  const cancelButton = event.target.closest("[data-cancel-rename]");
+
+  if (previewButton) {
+    previewWork(previewButton.dataset.previewWork);
+    return;
+  }
+  if (restoreButton) {
+    restoreWork(restoreButton.dataset.restoreWork);
+    return;
+  }
+  if (renameButton) {
+    const work = state.works.find((item) => item.id === renameButton.dataset.renameWork);
+    if (!work) return;
+    renamingWorkId = work.id;
+    renameDraftValue = work.name;
+    renderWorks();
+    return;
+  }
+  if (removeButton) {
+    const workId = removeButton.dataset.removeWork;
+    state.works = state.works.filter((item) => item.id !== workId);
+    if (renamingWorkId === workId) renamingWorkId = null;
+    renderAll();
+    return;
+  }
+  if (confirmButton) {
+    const workId = confirmButton.dataset.confirmRename;
+    const work = state.works.find((item) => item.id === workId);
+    const name = renameDraftValue.trim();
+    if (work && name) work.name = uniqueWorkName(name, workId);
+    renamingWorkId = null;
+    renderAll();
+    return;
+  }
+  if (cancelButton) {
+    renamingWorkId = null;
+    renderWorks();
+  }
+});
+
+els.workList.addEventListener("input", (event) => {
+  if (event.target.matches("[data-rename-input]")) renameDraftValue = event.target.value;
+});
+
+els.workList.addEventListener("keydown", (event) => {
+  if (!event.target.matches("[data-rename-input]")) return;
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const workId = event.target.dataset.renameInput;
+    const work = state.works.find((item) => item.id === workId);
+    const name = renameDraftValue.trim();
+    if (work && name) work.name = uniqueWorkName(name, workId);
+    renamingWorkId = null;
+    renderAll();
+  }
+  if (event.key === "Escape") {
+    renamingWorkId = null;
+    renderWorks();
+  }
+});
+
+els.modalCloseBtn.addEventListener("click", closeModal);
+els.modalBackdrop.addEventListener("click", (event) => {
+  if (event.target === els.modalBackdrop) closeModal();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.modalBackdrop.hidden) {
+    closeModal();
+    return;
+  }
+  const tag = document.activeElement?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  if (!(event.ctrlKey || event.metaKey)) return;
+  const key = event.key.toLowerCase();
+  if (key === "z") {
+    event.preventDefault();
+    if (event.shiftKey) {
+      redo();
+    } else {
+      undo();
+    }
+  } else if (key === "y") {
+    event.preventDefault();
+    redo();
   }
 });
 

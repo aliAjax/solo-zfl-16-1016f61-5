@@ -14,7 +14,10 @@
           <h1>活字排版工坊</h1>
         </div>
         <div class="top-actions">
-          <button id="saveDraftBtn" class="primary">保存草稿</button>
+          <button id="undoBtn" type="button" disabled>撤销</button>
+          <button id="redoBtn" type="button" disabled>重做</button>
+          <button id="saveDraftBtn">保存草稿</button>
+          <button id="saveWorkBtn" class="primary" type="button">存为作品</button>
           <button id="exportBtn">导出预览图</button>
           <button id="clearBoardBtn">清空版面</button>
         </div>
@@ -77,7 +80,7 @@
           <div class="status-strip">
             <div>
               <strong id="selectedTypeLabel">未选择字模</strong>
-              <span>点击字模后，在版面格子中落字，也可拖拽字模到版面。</span>
+              <span>点击字模后，在版面格子中落字，也可拖拽字模到版面。Ctrl/⌘+Z 撤销，Ctrl/⌘+Shift+Z 重做。</span>
             </div>
             <div id="shortageBadge" class="badge ok">数量充足</div>
           </div>
@@ -86,16 +89,29 @@
 
         <aside class="panel draft-panel">
           <div class="panel-head">
-            <h2>草稿与核对</h2>
+            <h2>核对与存档</h2>
             <span id="placedCount"></span>
           </div>
           <div id="usageList" class="usage-list"></div>
+          <div class="divider"></div>
+          <h3>命名作品</h3>
+          <div id="workList" class="draft-list"></div>
           <div class="divider"></div>
           <h3>已保存草稿</h3>
           <div id="draftList" class="draft-list"></div>
         </aside>
       </section>
     </main>
+
+    <div id="modalBackdrop" class="modal-backdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div class="modal-head">
+          <h2 id="modalTitle"></h2>
+          <button id="modalCloseBtn" class="mini-btn" type="button" title="关闭">×</button>
+        </div>
+        <div id="modalBody" class="modal-body"></div>
+      </div>
+    </div>
 
     <script src="app.js"></script>
   </body>
